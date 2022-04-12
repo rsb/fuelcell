@@ -12,6 +12,16 @@ import (
 // FParseErrWhitelist configures Flag parse errors to be ignored
 type FParseErrWhitelist flag.ParseErrorsWhitelist
 
+// ControlUsageFn is the function signature for the usage closure.
+type ControlUsageFn func(*Cmd) error
+
+// ControlFlagErrorFn is a function signature to allow user to control when
+// the parsing of a flag returns an error
+type ControlFlagErrorFn func(*Cmd, error) error
+
+// ControlHelpFn is a function signature to allow users to control help
+type ControlHelpFn func(*Cmd, []string)
+
 // Cmd represents a command on the command line. This command is heavily
 // influenced by Cobra cli. The goal of this project is to implement what
 // cobra did but with a few difference and of course remove unneeded legacy
@@ -116,20 +126,16 @@ type Cmd struct {
 	// that we can use on every pflag set and children commands
 	globNormFunc func(f *flag.FlagSet, name string) flag.NormalizedName
 
-	// usageFunc is usage func defined by user.
-	usageFunc func(*Cmd) error
-	// usageTemplate is usage template defined by user.
-	usageTemplate string
-	// flagErrorFunc is func defined by user and it's called when the parsing of
+	// Controls the usage string
+	usage Usage
+
+	// flagErrorFn is func defined by user, and it's called when the parsing of
 	// flags returns an error.
-	flagErrorFunc func(*Cmd, error) error
-	// helpTemplate is help template defined by user.
-	helpTemplate string
-	// helpFunc is help func defined by user.
-	helpFunc func(*Cmd, []string)
-	// helpCommand is command with usage 'help'. If it's not defined by user,
-	// cobra uses default help command.
-	helpCommand *Cmd
+	flagErrorFn ControlFlagErrorFn
+
+	// help allows for the configuration of the help message by the user
+	help Help
+
 	// versionTemplate is the version template defined by user.
 	versionTemplate string
 
@@ -216,6 +222,31 @@ func (c *Cmd) SetArgs(a []string) {
 	c.args = a
 }
 
+// SetInputStream allows the input stream to be assigned to the command.
+func (c *Cmd) SetInputStream(in io.Reader) {
+	c.streams.In = in
+}
+
+// SetOutputStream allows the output stream to be assigned to the command.
+func (c *Cmd) SetOutputStream(out io.Writer) {
+	c.streams.Out = out
+}
+
+// SetErrorStream allows the error stream to be assigned to the command.
+func (c *Cmd) SetErrorStream(e io.Writer) {
+	c.streams.Err = e
+}
+
+// SetUsageClosure assign user defined closure for usage
+func (c *Cmd) SetUsageClosure(fn ControlUsageFn) {
+	c.usage.Control = fn
+}
+
+// SetUsageTemplate allows the user to control the usage template.
+func (c *Cmd) SetUsageTemplate(s string) {
+	c.usage.Template = s
+}
+
 // DataStreams represents the 3 modes by which data travels via the cli.
 // In: 	the standard input os.Stdin of the app.
 // Out:	the standard output os.Stdout of the app.
@@ -234,10 +265,27 @@ func NewDefaultDataStreams() DataStreams {
 	return NewDataStreams(os.Stdin, os.Stdout, os.Stderr)
 }
 
+// NewDataStreams constructor used to create in/out and err streams
 func NewDataStreams(in io.Reader, out, err io.Writer) DataStreams {
 	return DataStreams{
 		In:  in,
 		Out: out,
 		Err: err,
 	}
+}
+
+// Usage allows the user to control the usage string in the cli
+type Usage struct {
+	Control  ControlUsageFn
+	Template string
+}
+
+// Help allow for the configuration of the cli help screen
+// Control: 	help function defined by the user
+// Template: 	help template defined by the user
+// Default: 	default help cmd
+type Help struct {
+	Control  ControlHelpFn
+	Template string
+	Default  *Cmd
 }
