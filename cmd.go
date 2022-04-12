@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"strings"
 
 	flag "github.com/spf13/pflag"
 )
@@ -130,8 +131,9 @@ type Cmd struct {
 	// CompletionOptions is a set of options to control the handling of shell completion
 	CompletionOptions CompletionOptions
 
-	// commandsAreSorted defines, if command slice are sorted or not.
-	commandsAreSorted bool
+	// isSortedCmds defines, if command slice are sorted or not.
+	isSortedCmds bool
+
 	// commandCalledAs is the name or alias value used to call this command.
 	commandCalledAs struct {
 		name   string
@@ -207,14 +209,29 @@ func (c *Cmd) SetArgs(a []string) {
 	c.args = a
 }
 
+// InputStream returns the assign stdin
+func (c *Cmd) InputStream() io.Reader {
+	return c.streams.In
+}
+
 // SetInputStream allows the input stream to be assigned to the command.
 func (c *Cmd) SetInputStream(in io.Reader) {
 	c.streams.In = in
 }
 
+// OutputStream returns the assign stdout
+func (c *Cmd) OutputStream() io.Writer {
+	return c.streams.Out
+}
+
 // SetOutputStream allows the output stream to be assigned to the command.
 func (c *Cmd) SetOutputStream(out io.Writer) {
 	c.streams.Out = out
+}
+
+// ErrorStream returns the assign stderr
+func (c *Cmd) ErrorStream() io.Writer {
+	return c.streams.Out
 }
 
 // SetErrorStream allows the error stream to be assigned to the command.
@@ -230,6 +247,95 @@ func (c *Cmd) SetUsageClosure(fn ControlUsageFn) {
 // SetUsageTemplate allows the user to control the usage template.
 func (c *Cmd) SetUsageTemplate(s string) {
 	c.usage.Template = s
+}
+
+// Parent returns this commands parent command.
+func (c *Cmd) Parent() *Cmd {
+	return c.parent
+}
+
+// HasParent determines if the command is a child
+func (c *Cmd) HasParent() bool {
+	return c.parent != nil
+}
+
+func (c *Cmd) Name() string {
+	name := c.Use
+	i := strings.Index(name, " ")
+	if i >= 0 {
+		name = name[:i]
+	}
+
+	return name
+}
+
+// Path return the full path to this command.
+func (c *Cmd) Path() string {
+	if c.HasParent() {
+		return c.Parent().Path() + " " + c.Name()
+	}
+
+	return c.Name()
+}
+
+// IsGlobalNormalizationEnabled determines if the closure is set
+func (c *Cmd) IsGlobalNormalizationEnabled() bool {
+	return c.flags.GlobalNormalizeFn != nil
+}
+
+// GlobalNormalization return the GlobalNormalizeFlagFn closure
+func (c *Cmd) GlobalNormalization() GlobalNormalizeFlagFn {
+	return c.flags.GlobalNormalizeFn
+}
+
+// SetGlobalNormalization assigns the closure to the command
+func (c *Cmd) SetGlobalNormalization(fn GlobalNormalizeFlagFn) {
+	c.flags.GlobalNormalizeFn = fn
+}
+
+func (c *Cmd) markCommandsSorted() {
+	c.isSortedCmds = true
+}
+
+func (c *Cmd) markCommandsUnsorted() {
+	c.isSortedCmds = false
+}
+
+func (c *Cmd) isCommandsSorted() bool {
+	return c.isSortedCmds
+}
+
+// Add assigns on or more commands to this parent command
+// NOTE: this will panic if you try to add a command to itself
+func (c *Cmd) Add(cmds ...*Cmd) {
+	for i, x := range cmds {
+		if cmds[i] == c {
+			panic("[Add Failed] Command can't be a child of itself")
+		}
+
+		cmds[i].parent = c
+		usageLen := len(x.Use)
+		if usageLen > c.commandsMaxUseLen {
+			c.commandsMaxUseLen = usageLen
+		}
+
+		cmdPathLen := len(x.Path())
+		if cmdPathLen > c.commandsMaxCommandPathLen {
+			c.commandsMaxCommandPathLen = cmdPathLen
+		}
+
+		nameLen := len(x.Name())
+		if nameLen > c.commandsMaxNameLen {
+			c.commandsMaxNameLen = nameLen
+		}
+
+		// If global normalization function exists, update all children
+		if c.IsGlobalNormalizationEnabled() {
+			x.SetGlobalNormalization(c.GlobalNormalization())
+		}
+		c.commands = append(c.commands, x)
+		c.markCommandsUnsorted()
+	}
 }
 
 // DataStreams represents the 3 modes by which data travels via the cli.
