@@ -22,6 +22,10 @@ type ControlFlagErrorFn func(*Cmd, error) error
 // ControlHelpFn is a function signature to allow users to control help
 type ControlHelpFn func(*Cmd, []string)
 
+// CLIRun defines how a Cmd should be executed when error handle is governed
+// by the returned error.
+type CLIRun func(*Cmd, []string) error
+
 // Cmd represents a command on the command line. This command is heavily
 // influenced by Cobra cli. The goal of this project is to implement what
 // cobra did but with a few difference and of course remove unneeded legacy
@@ -87,26 +91,15 @@ type Cmd struct {
 	//   * PersistentPostRun()
 	// All functions get the same args, the arguments after the command name.
 	//
-	// PersistentPreRun: children of this command will inherit and execute.
-	PersistentPreRun func(cmd *Cmd, args []string)
-	// PersistentPreRunE: PersistentPreRun but returns an error.
-	PersistentPreRunE func(cmd *Cmd, args []string) error
-	// PreRun: children of this command will not inherit.
-	PreRun func(cmd *Cmd, args []string)
-	// PreRunE: PreRun but returns an error.
-	PreRunE func(cmd *Cmd, args []string) error
-	// Run: Typically the actual work function. Most commands will only implement this.
-	Run func(cmd *Cmd, args []string)
-	// RunE: Run but returns an error.
-	RunE func(cmd *Cmd, args []string) error
-	// PostRun: run after the Run command.
-	PostRun func(cmd *Cmd, args []string)
-	// PostRunE: PostRun but returns an error.
-	PostRunE func(cmd *Cmd, args []string) error
-	// PersistentPostRun: children of this command will inherit and execute after PostRun.
-	PersistentPostRun func(cmd *Cmd, args []string)
-	// PersistentPostRunE: PersistentPostRun but returns an error.
-	PersistentPostRunE func(cmd *Cmd, args []string) error
+
+	// The run event function are executed in the following order:
+	// * GlobalPreRun
+	// * PreRun
+	// * Run
+	// * PostRun
+	// * GlobalPostRun
+	// All function have the same run signature CLIRun
+	lifecycle Lifecycle
 
 	// args is actual args parsed from flags.
 	args []string
@@ -288,4 +281,21 @@ type Help struct {
 	Control  ControlHelpFn
 	Template string
 	Default  *Cmd
+}
+
+// Lifecycle holds all the different events which are fired during the
+// lifetime of the command.
+// Events are run in the following order:
+// * GlobalPreRun
+// * PreRun
+// * Run
+// * PostRun
+// * GlobalPostRun
+// All events follow the same function signature.
+type Lifecycle struct {
+	GlobalPreRun  CLIRun
+	PreRun        CLIRun
+	Run           CLIRun
+	PostRun       CLIRun
+	GlobalPostRun CLIRun
 }
