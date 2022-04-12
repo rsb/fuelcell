@@ -26,6 +26,10 @@ type ControlHelpFn func(*Cmd, []string)
 // by the returned error.
 type CLIRun func(*Cmd, []string) error
 
+// GlobalNormalizeFlagFn defined the signature for the global normalization
+// function that can be used on every pflag set and children commands
+type GlobalNormalizeFlagFn func(f *flag.FlagSet, name string) flag.NormalizedName
+
 // Cmd represents a command on the command line. This command is heavily
 // influenced by Cobra cli. The goal of this project is to implement what
 // cobra did but with a few difference and of course remove unneeded legacy
@@ -103,21 +107,9 @@ type Cmd struct {
 
 	// args is actual args parsed from flags.
 	args []string
-	// flagErrorBuf contains all error messages from pflag.
-	flagErrorBuf *bytes.Buffer
-	// flags is full set of flags.
-	flags *flag.FlagSet
-	// pflags contains persistent flags.
-	pflags *flag.FlagSet
-	// lflags contains local flags.
-	lflags *flag.FlagSet
-	// iflags contains inherited flags.
-	iflags *flag.FlagSet
-	// parentsPflags is all persistent flags of cmd parents.
-	parentsPflags *flag.FlagSet
-	// globNormFunc is the global normalization function
-	// that we can use on every pflag set and children commands
-	globNormFunc func(f *flag.FlagSet, name string) flag.NormalizedName
+
+	// Manage all the pflags
+	flags Flags
 
 	// Controls the usage string
 	usage Usage
@@ -298,4 +290,15 @@ type Lifecycle struct {
 	Run           CLIRun
 	PostRun       CLIRun
 	GlobalPostRun CLIRun
+}
+
+// Flags hold all the various flag sets from `github.com/spf13/pflag`
+type Flags struct {
+	ErrorBuf          *bytes.Buffer
+	Full              *flag.FlagSet
+	Global            *flag.FlagSet
+	Local             *flag.FlagSet
+	Inherited         *flag.FlagSet
+	RootGlobal        *flag.FlagSet
+	GlobalNormalizeFn GlobalNormalizeFlagFn
 }
