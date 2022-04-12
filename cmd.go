@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
 
 	flag "github.com/spf13/pflag"
 )
@@ -132,12 +133,8 @@ type Cmd struct {
 	// versionTemplate is the version template defined by user.
 	versionTemplate string
 
-	// inReader is a reader defined by the user that replaces stdin
-	inReader io.Reader
-	// outWriter is a writer defined by the user that replaces stdout
-	outWriter io.Writer
-	// errWriter is a writer defined by the user that replaces stderr
-	errWriter io.Writer
+	// input, output and error streams
+	streams DataStreams
 
 	// CompletionOptions is a set of options to control the handling of shell completion
 	CompletionOptions CompletionOptions
@@ -193,4 +190,54 @@ type Cmd struct {
 	// SuggestionsMinimumDistance defines minimum levenshtein distance to display suggestions.
 	// Must be > 0.
 	SuggestionsMinimumDistance int
+}
+
+// Context returns underlying command context. If command was executed
+// with ExecuteContext or the context was set with SetContext, the
+// previously set context will be returned. Otherwise, nil is returned.
+//
+// Notice that a call to Execute and ExecuteC will replace a nil context of
+// a command with a context.Background, so a background context will be
+// returned by Context after one of these functions has been called.
+func (c *Cmd) Context() context.Context {
+	return c.ctx
+}
+
+// SetContext sets context for the command. It is set to context.Background
+// by default and will be overwritten by Command.ExecuteContext or
+// Command.ExecuteContextC
+func (c *Cmd) SetContext(ctx context.Context) {
+	c.ctx = ctx
+}
+
+// SetArgs sets arguments for the command. It is set to os.Args[1:] by default,
+// if desired, can be overridden particularly useful when testing.
+func (c *Cmd) SetArgs(a []string) {
+	c.args = a
+}
+
+// DataStreams represents the 3 modes by which data travels via the cli.
+// In: 	the standard input os.Stdin of the app.
+// Out:	the standard output os.Stdout of the app.
+// Err: the standard error os.Stderr of the app.
+//
+// These can all be controlled by the user, but left on touched the defaults
+// are listed as above
+type DataStreams struct {
+	In  io.Reader
+	Out io.Writer
+	Err io.Writer
+}
+
+// NewDefaultDataStreams represents the system defaults for all streams
+func NewDefaultDataStreams() DataStreams {
+	return NewDataStreams(os.Stdin, os.Stdout, os.Stderr)
+}
+
+func NewDataStreams(in io.Reader, out, err io.Writer) DataStreams {
+	return DataStreams{
+		In:  in,
+		Out: out,
+		Err: err,
+	}
 }
