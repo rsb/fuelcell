@@ -134,11 +134,8 @@ type Cmd struct {
 	// isSortedCmds defines, if command slice are sorted or not.
 	isSortedCmds bool
 
-	// commandCalledAs is the name or alias value used to call this command.
-	commandCalledAs struct {
-		name   string
-		called bool
-	}
+	// calledAs is the name or alias value used to call this command.
+	calledAs CalledAs
 
 	ctx context.Context
 
@@ -148,9 +145,7 @@ type Cmd struct {
 	parent *Cmd
 
 	// Max lengths of commands' string lengths for use in padding.
-	commandsMaxUseLen         int
-	commandsMaxCommandPathLen int
-	commandsMaxNameLen        int
+	maxLength MaxLengths
 
 	// TraverseChildren parses flags on all parents before executing child command.
 	TraverseChildren bool
@@ -259,6 +254,7 @@ func (c *Cmd) HasParent() bool {
 	return c.parent != nil
 }
 
+// Name returns the command's name: the first word in the use line
 func (c *Cmd) Name() string {
 	name := c.Use
 	i := strings.Index(name, " ")
@@ -269,6 +265,16 @@ func (c *Cmd) Name() string {
 	return name
 }
 
+// HasAlias determines if a given string is an alias of a command.
+func (c *Cmd) HasAlias(s string) bool {
+	for _, a := range c.Aliases {
+		if a == s {
+			return true
+		}
+	}
+	return false
+}
+
 // Path return the full path to this command.
 func (c *Cmd) Path() string {
 	if c.HasParent() {
@@ -276,6 +282,99 @@ func (c *Cmd) Path() string {
 	}
 
 	return c.Name()
+}
+
+// Root finds the root command.
+func (c *Cmd) Root() *Cmd {
+	if c.HasParent() {
+		return c.Parent().Root()
+	}
+
+	return c
+}
+
+// VisitParents visits all parents of the command and invokes fn on each
+func (c *Cmd) VisitParents(fn func(*Cmd)) {
+	if !c.HasParent() {
+		return
+	}
+
+	fn(c.Parent())
+	c.Parent().VisitParents(fn)
+}
+
+// Flags returns the complete FlagSet that applies to this command
+// (local and global declared here by all parents)
+func (c *Cmd) Flags() *flag.FlagSet {
+	if !c.flags.IsFull() {
+		c.flags.LoadFullSet(c.Name())
+	}
+
+	return c.flags.Full
+}
+
+// GlobalFlags returns the persistent FlagSet specifically set in the
+// current command
+func (c *Cmd) GlobalFlags() *flag.FlagSet {
+	if !c.flags.IsGlobal() {
+		c.flags.LoadGlobalSet(c.Name())
+	}
+
+	return c.flags.Global
+}
+
+// LocalSpecificFlags are flags specific to this command which will NOT
+// persist to subcommands.
+func (c *Cmd) LocalSpecificFlags() *flag.FlagSet {
+	return nil
+}
+
+// LocalFlags returns the local FlagSet specifically set in the current command.
+func (c *Cmd) LocalFlags() *flag.FlagSet {
+	return nil
+}
+
+// updateParentGlobalFlags updates flags.ParentsGlobal by
+// adding global flags for all parents
+// If c.flags.ParentsGlobal is nil it makes new.
+func (c *Cmd) updateParentGlobalFlags() {
+	if !c.flags.IsParentsGlobalFlags() {
+		c.flags.LoadParentsGlobal(c.Name())
+	}
+
+	if c.flags.IsGlobalNormalizeFn() {
+		c.flags.ParentsGlobal.SetNormalizeFunc(c.flags.GlobalNormalizeFn)
+	}
+
+	c.Root().GlobalFlags().AddFlagSet(flag.CommandLine)
+
+	c.VisitParents(func(parent *Cmd) {
+		if !c.flags.IsParentsGlobalFlags() {
+			c.flags.LoadParentsGlobal(c.Name())
+		}
+		c.flags.ParentsGlobal.AddFlagSet(parent.GlobalFlags())
+	})
+}
+
+func (c *Cmd) HasAvailableFlags() bool {
+	return c.Flags().HasAvailableFlags()
+}
+
+func (c *Cmd) UseLine() string {
+	line := c.Use
+	if c.HasParent() {
+		line = c.parent.Path() + " " + c.Use
+	}
+
+	if c.DisableFlagsInUseLine {
+		return line
+	}
+
+	if c.HasAvailableFlags() && !strings.Contains(line, "[flags]") {
+		line += " [flags]"
+	}
+
+	return line
 }
 
 // IsGlobalNormalizationEnabled determines if the closure is set
@@ -305,6 +404,27 @@ func (c *Cmd) isCommandsSorted() bool {
 	return c.isSortedCmds
 }
 
+func (c *Cmd) resetMaxLengths() {
+	c.maxLength.Reset()
+}
+
+func (c *Cmd) updateMaxLengthFrom(child *Cmd) {
+	usageLen := len(child.Use)
+	if usageLen > c.maxLength.Use {
+		c.maxLength.Use = usageLen
+	}
+
+	pathLen := len(child.Path())
+	if pathLen > c.maxLength.Path {
+		c.maxLength.Path = pathLen
+	}
+
+	nameLen := len(child.Name())
+	if nameLen > c.maxLength.Name {
+		c.maxLength.Name = nameLen
+	}
+}
+
 // Add assigns on or more commands to this parent command
 // NOTE: this will panic if you try to add a command to itself
 func (c *Cmd) Add(cmds ...*Cmd) {
@@ -314,27 +434,35 @@ func (c *Cmd) Add(cmds ...*Cmd) {
 		}
 
 		cmds[i].parent = c
-		usageLen := len(x.Use)
-		if usageLen > c.commandsMaxUseLen {
-			c.commandsMaxUseLen = usageLen
-		}
-
-		cmdPathLen := len(x.Path())
-		if cmdPathLen > c.commandsMaxCommandPathLen {
-			c.commandsMaxCommandPathLen = cmdPathLen
-		}
-
-		nameLen := len(x.Name())
-		if nameLen > c.commandsMaxNameLen {
-			c.commandsMaxNameLen = nameLen
-		}
-
-		// If global normalization function exists, update all children
+		c.updateMaxLengthFrom(x)
 		if c.IsGlobalNormalizationEnabled() {
 			x.SetGlobalNormalization(c.GlobalNormalization())
 		}
+
 		c.commands = append(c.commands, x)
 		c.markCommandsUnsorted()
+	}
+}
+
+// Remove removes one or more commands from the parent command.
+func (c *Cmd) Remove(cmds ...*Cmd) {
+	var commands []*Cmd
+
+MAIN:
+	for _, command := range c.commands {
+		for _, cmd := range cmds {
+			if command == cmd {
+				command.parent = nil
+				continue MAIN
+			}
+		}
+		commands = append(commands, command)
+	}
+
+	// recompute all lengths
+	c.resetMaxLengths()
+	for _, command := range c.commands {
+		c.updateMaxLengthFrom(command)
 	}
 }
 
@@ -381,6 +509,25 @@ type Help struct {
 	Default  *Cmd
 }
 
+// MaxLengths store the setting which control the max length of
+// Use 	- The usage line.
+// Path - The command path. The full path to this command
+// Name - The command name. Which is the first word in the usage
+//
+// This is used in padding.
+type MaxLengths struct {
+	Use  int
+	Path int
+	Name int
+}
+
+// Reset reverts all lengths to their default values
+func (ml MaxLengths) Reset() {
+	ml.Use = 0
+	ml.Path = 0
+	ml.Name = 0
+}
+
 // Lifecycle holds all the different events which are fired during the
 // lifetime of the command.
 // Events are run in the following order:
@@ -400,11 +547,71 @@ type Lifecycle struct {
 
 // Flags hold all the various flag sets from `github.com/spf13/pflag`
 type Flags struct {
-	ErrorBuf          *bytes.Buffer
-	Full              *flag.FlagSet
-	Global            *flag.FlagSet
-	Local             *flag.FlagSet
-	Inherited         *flag.FlagSet
-	RootGlobal        *flag.FlagSet
+	ErrorBuf      *bytes.Buffer
+	Full          *flag.FlagSet
+	Global        *flag.FlagSet
+	Local         *flag.FlagSet
+	Inherited     *flag.FlagSet
+	ParentsGlobal *flag.FlagSet
+
 	GlobalNormalizeFn GlobalNormalizeFlagFn
+}
+
+func (f *Flags) IsParentsGlobalFlags() bool {
+	return f.ParentsGlobal == nil
+}
+
+func (f *Flags) LoadParentsGlobal(name string) {
+	f.ParentsGlobal = newFlagSet(name)
+	f.ParentsGlobal.SetOutput(f.LoadErrorBufferWhenEmpty())
+	f.ParentsGlobal.SortFlags = false
+}
+
+func (f *Flags) IsGlobalNormalizeFn() bool {
+	return f.GlobalNormalizeFn != nil
+}
+
+func (f *Flags) IsErrorBuffer() bool {
+	return f.ErrorBuf != nil
+}
+
+func (f *Flags) LoadErrorBufferWhenEmpty() *bytes.Buffer {
+	if f.IsErrorBuffer() {
+		return f.ErrorBuf
+	}
+
+	f.LoadErrorBuffer()
+	return f.ErrorBuf
+}
+
+func (f *Flags) LoadErrorBuffer() {
+	f.ErrorBuf = new(bytes.Buffer)
+}
+
+func (f *Flags) IsFull() bool {
+	return f.Global != nil
+}
+
+func (f *Flags) LoadFullSet(name string) {
+	f.Full = newFlagSet(name)
+	f.Full.SetOutput(f.LoadErrorBufferWhenEmpty())
+}
+
+func (f *Flags) IsGlobal() bool {
+	return f.Global != nil
+}
+
+func (f *Flags) LoadGlobalSet(name string) {
+	f.Global = newFlagSet(name)
+	f.Global.SetOutput(f.LoadErrorBufferWhenEmpty())
+}
+
+// CalledAs is the name of alias used to call a command
+type CalledAs struct {
+	Name     string
+	IsCalled bool
+}
+
+func newFlagSet(name string) *flag.FlagSet {
+	return flag.NewFlagSet(name, flag.ContinueOnError)
 }
