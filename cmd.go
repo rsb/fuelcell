@@ -128,6 +128,9 @@ type Cmd struct {
 	// input, output and error streams
 	streams DataStreams
 
+	// FParseErrWhitelist flag parse errors to be ignored
+	FParseErrWhitelist FParseErrWhitelist
+
 	// CompletionOptions is a set of options to control the handling of shell completion
 	CompletionOptions CompletionOptions
 
@@ -334,6 +337,36 @@ func (c *Cmd) LocalFlags() *flag.FlagSet {
 	return nil
 }
 
+// ParseFlags parses global and local flags
+func (c *Cmd) ParseFlags(args []string) error {
+	if c.DisableFlagParsing {
+		return nil
+	}
+
+	errorBuf := c.flags.LoadErrorBufferWhenEmpty()
+	beforeErrorLen := errorBuf.Len()
+
+	c.mergeGlobalFlags()
+
+	// do it here after merging all the flags and just before parse
+	c.Flags().ParseErrorsWhitelist = flag.ParseErrorsWhitelist(c.FParseErrWhitelist)
+
+	err := c.Flags().Parse(args)
+	// Print warnings if they occurred (e.g. deprecated flag messages).
+	if errorBuf.Len()-beforeErrorLen > 0 && err == nil {
+		//c.Print(errorBuf.String())
+	}
+	return err
+}
+
+// mergeGlobalFlags merges c.flags.Global into c.flags.Full
+// and adds missing global flags to all parents.
+func (c *Cmd) mergeGlobalFlags() {
+	c.updateParentGlobalFlags()
+	c.Flags().AddFlagSet(c.GlobalFlags())
+	c.Flags().AddFlagSet(c.flags.ParentsGlobal)
+}
+
 // updateParentGlobalFlags updates flags.ParentsGlobal by
 // adding global flags for all parents
 // If c.flags.ParentsGlobal is nil it makes new.
@@ -349,9 +382,6 @@ func (c *Cmd) updateParentGlobalFlags() {
 	c.Root().GlobalFlags().AddFlagSet(flag.CommandLine)
 
 	c.VisitParents(func(parent *Cmd) {
-		if !c.flags.IsParentsGlobalFlags() {
-			c.flags.LoadParentsGlobal(c.Name())
-		}
 		c.flags.ParentsGlobal.AddFlagSet(parent.GlobalFlags())
 	})
 }
