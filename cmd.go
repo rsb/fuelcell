@@ -3,11 +3,13 @@ package fuelcell
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"github.com/rsb/failure"
+	flag "github.com/spf13/pflag"
 	"io"
 	"os"
+	"sort"
 	"strings"
-
-	flag "github.com/spf13/pflag"
 )
 
 // FParseErrWhitelist configures Flag parse errors to be ignored
@@ -183,6 +185,182 @@ type Cmd struct {
 	SuggestionsMinimumDistance int
 }
 
+func (c *Cmd) preRun() {
+	for _, x := range initializers {
+		x()
+	}
+}
+func (c *Cmd) execute(a []string) (err error) {
+	if c == nil {
+		return failure.System("can not execute on a Cmd that is nil")
+	}
+
+	streams := c.streams
+
+	if len(c.Deprecated) > 0 {
+		streams.Printf("Command %q is deprecated, %s\n", c.Deprecated)
+	}
+
+	// initialize help and version flag at the last point possible to allow
+	// for user overriding.
+	c.InitDefaultHelpFlag()
+	c.InitDefaultVersionFlag()
+
+	if err = c.ParseFlags(a); err != nil {
+		return c.FlagErrorFn()(c, err)
+	}
+
+	// If help is called, regardless of the other flags, return we want help.
+	// Also say we need help if the command is not runnable.
+	helpValue, err := c.Flags().GetBool("help")
+	if err != nil {
+		// should be impossible to get here as we always declare a help
+		// flag in InitDefaultHelpFlag()
+		streams.Println("\"help\" flag declared as non-bool. Please correct your code.")
+		return failure.ToSystem(err, "c.Flags().GetBool(help) failed")
+	}
+
+	if helpValue {
+		return flag.ErrHelp
+	}
+
+	if c.Version != "" {
+		versionValue, err := c.Flags().GetBool("version")
+		if err != nil {
+			streams.Println("\"help\" flag declared as non-bool. Please correct your code.")
+			return failure.ToSystem(err, "c.Flags().GetBool(version) failed")
+		}
+
+		if versionValue {
+			err := tpl(streams.Out(), c.VersionTemplate(), c)
+			if err != nil {
+				streams.Println(err)
+			}
+			return err
+		}
+	}
+
+	events := c.lifecycle
+
+	if !events.IsRunnable() {
+		return flag.ErrHelp
+	}
+
+	c.preRun()
+
+	argWoFlags := c.Flags().Args()
+	if c.DisableFlagParsing {
+		argWoFlags = a
+	}
+
+	if err := c.ValidateArgs(argWoFlags); err != nil {
+		return err
+	}
+
+	for p := c; p != nil; p = p.Parent() {
+		if p.lifecycle.GlobalPreRun != nil {
+			if err := p.lifecycle.GlobalPreRun(c, argWoFlags); err != nil {
+				return err
+			}
+			break
+		}
+	}
+
+	if c.lifecycle.PreRun != nil {
+		if err := c.lifecycle.PreRun(c, argWoFlags); err != nil {
+			return err
+		}
+	}
+
+	if err := c.validateRequiredFlags(); err != nil {
+		return err
+	}
+
+	if c.lifecycle.Run != nil {
+		if err := c.lifecycle.Run(c, argWoFlags); err != nil {
+			return err
+		}
+	}
+
+	if c.lifecycle.PostRun != nil {
+		if err := c.lifecycle.PostRun(c, argWoFlags); err != nil {
+			return err
+		}
+	}
+
+	for p := c; p != nil; p = p.Parent() {
+		if p.lifecycle.GlobalPostRun != nil {
+			if err := p.lifecycle.GlobalPostRun(c, argWoFlags); err != nil {
+				return err
+			}
+			break
+		}
+	}
+
+	return nil
+}
+
+func (c *Cmd) ValidateArgs(args []string) error {
+	if c.Args == nil {
+		return nil
+	}
+
+	return c.Args(c, args)
+
+}
+
+// VersionTemplate return version template for the command.
+func (c *Cmd) VersionTemplate() string {
+	if c.versionTemplate != "" {
+		return c.versionTemplate
+	}
+
+	if c.HasParent() {
+		return c.parent.VersionTemplate()
+	}
+
+	return `{{with .Name}}{{printf "%s " .}}{{end}}{{printf "version %s" .Version}}
+`
+}
+
+// InitDefaultHelpFlag adds default help flag to this command.
+// It is called automatically by executing this command or by
+// calling help and usage. When help exists nothing is done.
+func (c *Cmd) InitDefaultHelpFlag() {
+	c.mergeGlobalFlags()
+	if c.Flags().Lookup("help") == nil {
+		usage := "help for "
+		if c.Name() == "" {
+			usage += "this command"
+		} else {
+			usage += c.Name()
+		}
+		c.Flags().BoolP("help", "h", false, usage)
+	}
+}
+
+func (c *Cmd) InitDefaultVersionFlag() {
+	if c.Version == "" {
+		return
+	}
+
+	c.mergeGlobalFlags()
+	if c.Flags().Lookup("version") == nil {
+		usage := "version for "
+		if c.Name() == "" {
+			usage += "this command"
+		} else {
+			usage += c.Name()
+		}
+
+		if c.Flags().ShorthandLookup("v") == nil {
+			c.Flags().BoolP("version", "v", false, usage)
+		} else {
+			c.Flags().Bool("version", false, usage)
+		}
+	}
+}
+
 // Context returns underlying command context. If command was executed
 // with ExecuteContext or the context was set with SetContext, the
 // previously set context will be returned. Otherwise, nil is returned.
@@ -209,32 +387,32 @@ func (c *Cmd) SetArgs(a []string) {
 
 // InputStream returns the assign stdin
 func (c *Cmd) InputStream() io.Reader {
-	return c.streams.In
+	return c.streams.In()
 }
 
 // SetInputStream allows the input stream to be assigned to the command.
 func (c *Cmd) SetInputStream(in io.Reader) {
-	c.streams.In = in
+	c.streams.SetIn(in)
 }
 
 // OutputStream returns the assign stdout
 func (c *Cmd) OutputStream() io.Writer {
-	return c.streams.Out
+	return c.streams.Out()
 }
 
 // SetOutputStream allows the output stream to be assigned to the command.
 func (c *Cmd) SetOutputStream(out io.Writer) {
-	c.streams.Out = out
+	c.streams.SetOut(out)
 }
 
 // ErrorStream returns the assign stderr
 func (c *Cmd) ErrorStream() io.Writer {
-	return c.streams.Out
+	return c.streams.Error()
 }
 
 // SetErrorStream allows the error stream to be assigned to the command.
 func (c *Cmd) SetErrorStream(e io.Writer) {
-	c.streams.Err = e
+	c.streams.SetError(e)
 }
 
 // SetUsageClosure assign user defined closure for usage
@@ -252,9 +430,41 @@ func (c *Cmd) Parent() *Cmd {
 	return c.parent
 }
 
+// NameAndAliases returns a list of the command name and all aliases
+func (c *Cmd) NameAndAliases() string {
+	return strings.Join(append([]string{c.Name()}, c.Aliases...), ",")
+}
+
+// HasExample determines if the command has examples
+func (c *Cmd) HasExample() bool {
+	return len(c.Example) > 0
+}
+
 // HasParent determines if the command is a child
 func (c *Cmd) HasParent() bool {
 	return c.parent != nil
+}
+
+// HasSubCommands determines if the command has any child commands.
+func (c *Cmd) HasSubCommands() bool {
+	return len(c.commands) > 0
+}
+
+// Commands returns a sorted slice of child commands
+func (c *Cmd) Commands() []*Cmd {
+	if !c.isCommandsSorted() {
+		sort.Sort(sortByName(c.commands))
+		c.isSortedCmds = true
+	}
+	return c.commands
+}
+
+// ResetCommands delete parent, subcommands, and help command from this cmd.
+func (c *Cmd) ResetCommands() {
+	c.parent = nil
+	c.commands = nil
+	c.help.ClearDefault()
+	c.flags.ClearParentsGlobal()
 }
 
 // Name returns the command's name: the first word in the use line
@@ -337,6 +547,18 @@ func (c *Cmd) LocalFlags() *flag.FlagSet {
 	return nil
 }
 
+func (c *Cmd) FlagErrorFn() ControlFlagErrorFn {
+	if c.flagErrorFn != nil {
+		return c.flagErrorFn
+	}
+
+	if c.HasParent() {
+		return c.parent.FlagErrorFn()
+	}
+
+	return func(c *Cmd, err error) error { return err }
+}
+
 // ParseFlags parses global and local flags
 func (c *Cmd) ParseFlags(args []string) error {
 	if c.DisableFlagParsing {
@@ -354,7 +576,7 @@ func (c *Cmd) ParseFlags(args []string) error {
 	err := c.Flags().Parse(args)
 	// Print warnings if they occurred (e.g. deprecated flag messages).
 	if errorBuf.Len()-beforeErrorLen > 0 && err == nil {
-		//c.Print(errorBuf.String())
+		// c.Print(errorBuf.String())
 	}
 	return err
 }
@@ -455,6 +677,30 @@ func (c *Cmd) updateMaxLengthFrom(child *Cmd) {
 	}
 }
 
+func (c *Cmd) validateRequiredFlags() error {
+	if c.DisableFlagParsing {
+		return nil
+	}
+
+	flags := c.Flags()
+	var missing []string
+	flags.VisitAll(func(pflag *flag.Flag) {
+		requiredAnnotation, found := pflag.Annotations[BashCompOneRequiredFlag]
+		if !found {
+			return
+		}
+		if (requiredAnnotation[0] == "true") && !pflag.Changed {
+			missing = append(missing, pflag.Name)
+		}
+	})
+
+	if len(missing) > 0 {
+		return failure.System(`required flag(s) "%s" not set`, strings.Join(missing, `","`))
+	}
+
+	return nil
+}
+
 // Add assigns on or more commands to this parent command
 // NOTE: this will panic if you try to add a command to itself
 func (c *Cmd) Add(cmds ...*Cmd) {
@@ -504,23 +750,82 @@ MAIN:
 // These can all be controlled by the user, but left on touched the defaults
 // are listed as above
 type DataStreams struct {
-	In  io.Reader
-	Out io.Writer
-	Err io.Writer
-}
-
-// NewDefaultDataStreams represents the system defaults for all streams
-func NewDefaultDataStreams() DataStreams {
-	return NewDataStreams(os.Stdin, os.Stdout, os.Stderr)
+	in  io.Reader
+	out io.Writer
+	err io.Writer
 }
 
 // NewDataStreams constructor used to create in/out and err streams
 func NewDataStreams(in io.Reader, out, err io.Writer) DataStreams {
 	return DataStreams{
-		In:  in,
-		Out: out,
-		Err: err,
+		in:  in,
+		out: out,
+		err: err,
 	}
+}
+
+func (ds *DataStreams) SetIn(in io.Reader) {
+	ds.in = in
+}
+
+func (ds *DataStreams) In() io.Reader {
+	if ds.in == nil {
+		ds.in = os.Stdin
+	}
+	return ds.in
+}
+
+func (ds *DataStreams) SetOut(out io.Writer) {
+	ds.out = out
+}
+
+func (ds *DataStreams) Out() io.Writer {
+	if ds.out == nil {
+		ds.out = os.Stdout
+	}
+	return ds.out
+}
+
+func (ds *DataStreams) SetError(err io.Writer) {
+	ds.err = err
+}
+
+func (ds *DataStreams) Error() io.Writer {
+	if ds.err == nil {
+		ds.err = os.Stderr
+	}
+
+	return ds.err
+}
+
+// Print is a convenience method to Print to the DataStreams output
+func (ds *DataStreams) Print(i ...interface{}) {
+	_, _ = fmt.Fprint(ds.Out(), i...)
+}
+
+// Println is a convenience method to Println
+func (ds *DataStreams) Println(i ...interface{}) {
+	ds.Print(fmt.Sprintln(i...))
+}
+
+// Printf is a convenience to Printf
+func (ds *DataStreams) Printf(format string, i ...interface{}) {
+	ds.Print(fmt.Sprintf(format, i...))
+}
+
+// PrintErr is a convenience method to Fprint to the defined Err output
+func (ds *DataStreams) PrintErr(i ...interface{}) {
+	_, _ = fmt.Fprint(ds.Error(), i...)
+}
+
+// PrintErrln is a convenience method to Println to the defined Err output
+func (ds *DataStreams) PrintErrln(i ...interface{}) {
+	ds.PrintErr(fmt.Sprintln(i...))
+}
+
+// PrintErrf is a convenience method to Print
+func (ds *DataStreams) PrintErrf(i ...interface{}) {
+	ds.Print(fmt.Sprintln(i...))
 }
 
 // Usage allows the user to control the usage string in the cli
@@ -537,6 +842,10 @@ type Help struct {
 	Control  ControlHelpFn
 	Template string
 	Default  *Cmd
+}
+
+func (h *Help) ClearDefault() {
+	h.Default = nil
 }
 
 // MaxLengths store the setting which control the max length of
@@ -575,6 +884,11 @@ type Lifecycle struct {
 	GlobalPostRun CLIRun
 }
 
+// IsRunnable Determines if a command can be executed.
+func (l *Lifecycle) IsRunnable() bool {
+	return l.Run != nil
+}
+
 // Flags hold all the various flag sets from `github.com/spf13/pflag`
 type Flags struct {
 	ErrorBuf      *bytes.Buffer
@@ -585,6 +899,10 @@ type Flags struct {
 	ParentsGlobal *flag.FlagSet
 
 	GlobalNormalizeFn GlobalNormalizeFlagFn
+}
+
+func (f *Flags) ClearParentsGlobal() {
+	f.ParentsGlobal = nil
 }
 
 func (f *Flags) IsParentsGlobalFlags() bool {
@@ -645,3 +963,9 @@ type CalledAs struct {
 func newFlagSet(name string) *flag.FlagSet {
 	return flag.NewFlagSet(name, flag.ContinueOnError)
 }
+
+type sortByName []*Cmd
+
+func (s sortByName) Len() int           { return len(s) }
+func (s sortByName) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
+func (s sortByName) Less(i, j int) bool { return s[i].Name() < s[j].Name() }
