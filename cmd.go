@@ -185,11 +185,58 @@ type Cmd struct {
 	SuggestionsMinimumDistance int
 }
 
+// Find the target command given the args and the cmd tree.
+// This should be run on the highest node. Only searches down.
+func (c *Cmd) Find(args []string) (*Cmd, []string, error) {
+	var innerFind func(*Cmd, []string) (*Cmd, []string)
+
+	innerFind = func(c *Cmd, innerArgs []string) (*Cmd, []string) {
+		argsWOflags := stripFlags(innerArgs, c)
+		if len(argsWOflags) == 0 {
+			return c, innerArgs
+		}
+		nextSubCmd := argsWOflags[0]
+
+		cmd := c.findNext(nextSubCmd)
+		if cmd != nil {
+			return innerFind(cmd, argsMinusFirstX(innerArgs, nextSubCmd))
+		}
+		return c, innerArgs
+	}
+
+	found, a := innerFind(c, args)
+	if found.Args == nil {
+		return found, a, legacyArgs(found, stripFlags(a, found))
+	}
+
+	return found, a, nil
+}
+
 func (c *Cmd) preRun() {
 	for _, x := range initializers {
 		x()
 	}
 }
+
+func (c *Cmd) Execute() error {
+	_, err := c.ExecuteC()
+	return err
+}
+
+func (c *Cmd) ExecuteC() (*Cmd, error) {
+	if c.ctx == nil {
+		c.ctx = context.Background()
+	}
+
+	// Regardless of what command execute is called on, run on Root only.
+	if c.HasParent() {
+		return c.Root().ExecuteC()
+	}
+
+	// initialize help at the last point to allow for user overriding.
+	return nil, nil
+}
+
 func (c *Cmd) execute(a []string) (err error) {
 	if c == nil {
 		return failure.System("can not execute on a Cmd that is nil")
@@ -298,6 +345,19 @@ func (c *Cmd) execute(a []string) (err error) {
 	}
 
 	return nil
+}
+
+// InitDefaultHelpCmd adds default help command to this command.
+// It is called automatically by executing the cmd or by calling help
+// and usage. Ignored if cmd already has help or no subcommands
+func (c *Cmd) InitDefaultHelpCmd() {
+	if !c.HasSubCommands() {
+		return
+	}
+
+	if c.help.Default == nil {
+
+	}
 }
 
 func (c *Cmd) ValidateArgs(args []string) error {
@@ -676,6 +736,21 @@ func (c *Cmd) updateMaxLengthFrom(child *Cmd) {
 		c.maxLength.Name = nameLen
 	}
 }
+func (c *Cmd) findNext(next string) *Cmd {
+	matches := make([]*Cmd, 0)
+	for _, cmd := range c.commands {
+		if cmd.Name() == next || cmd.HasAlias(next) {
+			cmd.calledAs.Name = next
+			return cmd
+		}
+	}
+
+	if len(matches) == 1 {
+		return matches[0]
+	}
+
+	return nil
+}
 
 func (c *Cmd) validateRequiredFlags() error {
 	if c.DisableFlagParsing {
@@ -969,3 +1044,108 @@ type sortByName []*Cmd
 func (s sortByName) Len() int           { return len(s) }
 func (s sortByName) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 func (s sortByName) Less(i, j int) bool { return s[i].Name() < s[j].Name() }
+
+func NewDefaultHelpCmd(c *Cmd) *Cmd {
+	return &Cmd{
+		Use:   "help [command]",
+		Short: "Help about any command",
+		Long: `Help provides help for any command in the application.
+Simply type ` + c.Name() + ` help [path to command] for full details`,
+		ValidArgs: func(c *Cmd, args []string, toComplete string) ([]string, ShellCompDirective) {
+			var completions []string
+			cmd, _, e := c.Root().Find(args)
+			if e != nil {
+				return nil, ShellCompDirectiveNoFileComp
+			}
+
+			if cmd == nil {
+				// Root help cmd
+				cmd = c.Root()
+			}
+
+			for _, subCmd := range cmd.Commands() {
+			}
+		},
+	}
+}
+
+func stripFlags(args []string, c *Cmd) []string {
+	if len(args) == 0 {
+		return args
+	}
+
+	c.mergeGlobalFlags()
+
+	var commands []string
+	flags := c.Flags()
+
+LOOP:
+	for len(args) > 0 {
+		s := args[0]
+		args = args[1:]
+		switch {
+		case s == "--":
+			// "--" terminates the flags
+			break LOOP
+		case strings.HasPrefix(s, "--") && !strings.Contains(s, "=") && !hasNoOptDefVal(s[2:], flags):
+			// If '--flag arg' than
+			// delete arg from args.
+			fallthrough // (do the same as below)
+		case strings.HasPrefix(s, "-") && !strings.Contains(s, "=") && len(s) == 2 && !shortHasNoOptDefVal(s[1:], flags):
+			// If '-f arg' then
+			// delete 'arg' from args or break the loop if len(args) <= 1
+			if len(args) <= 1 {
+				break LOOP
+			} else {
+				args = args[1:]
+				continue
+			}
+		case s != "" && !strings.HasPrefix(s, "-"):
+			commands = append(commands, s)
+		}
+	}
+
+	return commands
+}
+
+// argsMinusFirstX removes only the first x from args.  Otherwise, commands
+// that look like openshift admin policy add-role-to-user admin my-user, lose
+// the admin argument (arg[4]).
+func argsMinusFirstX(args []string, x string) []string {
+	for i, y := range args {
+		if x == y {
+			var ret []string
+			ret = append(ret, args[:i]...)
+			ret = append(ret, args[i+1:]...)
+			return ret
+		}
+	}
+	return args
+}
+
+func isFlagArg(arg string) bool {
+	return (len(arg) >= 3 && arg[1] == '-') ||
+		(len(arg) >= 2 && arg[0] == '-' && arg[1] != '-')
+}
+
+func hasNoOptDefVal(name string, fs *flag.FlagSet) bool {
+	flag := fs.Lookup(name)
+	if flag == nil {
+		return false
+	}
+
+	return flag.NoOptDefVal != ""
+}
+
+func shortHasNoOptDefVal(name string, fs *flag.FlagSet) bool {
+	if len(name) == 0 {
+		return false
+	}
+
+	flag := fs.ShorthandLookup(name[:1])
+	if flag == nil {
+		return false
+	}
+
+	return flag.NoOptDefVal != ""
+}
